@@ -30,9 +30,9 @@ def analyze_position(xyxy, frame_width, frame_height):
     frame_area = frame_width * frame_height
     area_ratio = box_area / frame_area
     
-    if area_ratio > 0.3:
+    if area_ratio > 0.05:
         distance = "close"
-    elif area_ratio > 0.1:
+    elif area_ratio > 0.015:
         distance = "medium distance"
     else:
         distance = "far"

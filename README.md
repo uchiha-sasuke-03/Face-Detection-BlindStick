@@ -1,6 +1,8 @@
 # Smart Blind Stick — AI Object Detection & Navigation System
 
-An advanced, real-time AI computer vision system designed to act as the **"eyes"** for a smart blind stick. Powered by **YOLOv8**, **MTCNN**, and **FaceNet (InceptionResnetV1)**, this system runs locally on a camera feed to detect obstacles, recognize known faces by name, read text via OCR, and analyze traffic lights — all while providing seamless **audio feedback** without blocking the video stream.
+An advanced, real-time AI computer vision system designed to act as the **"eyes"** for a smart blind stick. Powered by **YOLOv8**, **DeepFace**, and **Facenet512**, this system runs locally on a camera feed to detect obstacles, recognize known faces by name, read text via OCR, and analyze traffic lights — all while providing seamless **audio feedback** without blocking the video stream.
+
+Optimized for **Raspberry Pi 4** deployment — no PyTorch required.
 
 ---
 
@@ -13,10 +15,10 @@ Uses a pre-trained **YOLOv8s** model to detect common objects (people, vehicles,
 
 > **Smart Alert Mode**: Only objects at **"close" distance** trigger voice alerts. Medium and far objects are shown on-screen but remain silent — reducing noise and prioritizing immediate hazards.
 
-### 👤 Face Recognition (PyTorch FaceNet + MTCNN)
+### 👤 Face Recognition (DeepFace + Facenet512)
 When YOLO detects a **"person"**, the system automatically tries to identify them:
-- **MTCNN** (Multi-task Cascaded Convolutional Networks): State-of-the-art face detection that works reliably in **low light, varied angles, and partial occlusion**.
-- **InceptionResnetV1 (FaceNet)**: Extracts **512-dimensional face embeddings** pre-trained on **VGGFace2** (3.3 million faces).
+- **OpenCV Haar Cascade**: Lightweight, fast face detection optimized for ARM/Raspberry Pi hardware.
+- **Facenet512**: Extracts **512-dimensional face embeddings** via DeepFace — high accuracy, low resource usage.
 - **Cosine Similarity Matching**: Compares live embeddings against a trained database using weighted scoring (60% best individual + 40% average centroid).
 - **YOLO Integration**: Replaces the generic "person" label with the recognized name — speaks **"Anupam close, straight ahead"** instead of "person close, straight ahead".
 - **Low-Light Robustness**: Applies **CLAHE** (Contrast Limited Adaptive Histogram Equalization) as a fallback when face detection initially fails.
@@ -42,14 +44,14 @@ Prevents auditory overload by enforcing a **3-second cooldown** on repeated obst
 
 ## 💻 Prerequisites & Requirements
 
-This software is built and optimized for **Windows**.
+This software is built and optimized for **Windows** (with Raspberry Pi 4 deployment in mind).
 
 ### 1. Hardware Required
 - A PC/Laptop (a dedicated GPU is recommended for higher framerates).
 - A standard Webcam (or Raspberry Pi Camera module).
 
 ### 2. Software Required
-- **Python 3.10–3.14** (PyTorch-based pipeline, no TensorFlow dependency).
+- **Python 3.10–3.14**.
 - **Git** (to clone the repository).
 
 ---
@@ -70,11 +72,10 @@ python -m venv venv
 
 ### Step 3: Install Dependencies
 ```cmd
-pip install ultralytics opencv-contrib-python easyocr pywin32
-pip install facenet-pytorch --no-deps
+pip install -r requirements.txt
 ```
 
-> **Note:** The first run will automatically download pre-trained weights for YOLOv8, MTCNN, and InceptionResnetV1 into your system cache. This may take a few minutes.
+> **Note:** The first run will automatically download pre-trained weights for YOLOv8 and Facenet512 into your system cache. This may take a few minutes.
 
 ### Step 4: Setup Facial Recognition
 
@@ -103,18 +104,19 @@ python train_faces.py
 
 This will:
 - Scan all images in `known_faces/` (including subfolders)
-- Detect faces using **MTCNN** (handles all angles and lighting)
-- Extract **512-dimensional FaceNet embeddings** per face
+- Detect faces using **OpenCV Haar Cascade** (fast, lightweight)
+- Extract **512-dimensional Facenet512 embeddings** per face via **DeepFace**
 - Generate **9 augmented variants** per image (gamma, brightness, CLAHE, flip)
-- Save the database to `known_faces/face_embeddings_v5.pkl`
+- Save the database to `known_faces/face_embeddings_v6.pkl`
 
 **Example output:**
 ```
 ==============================================================
-  SMART BLIND STICK - FACE TRAINING v5 (PyTorch FaceNet)
+  SMART BLIND STICK - FACE TRAINING v6 (DeepFace Facenet512)
 ==============================================================
-  Model         : InceptionResnetV1 (VGGFace2, 512-dim)
-  Detector      : MTCNN (PyTorch)
+  Model         : Facenet512 (512-dim embeddings)
+  Detector      : OpenCV Haar Cascade
+  Backend       : DeepFace (TF-Keras)
   Augmentation  : flip + gamma + brightness + CLAHE (9x)
 ==============================================================
 
@@ -153,7 +155,7 @@ python main.py
 
 ```
 ├── main.py                  # Core application loop (YOLOv8 + face integration)
-├── train_faces.py           # Face embedding training pipeline (MTCNN + FaceNet)
+├── train_faces.py           # Face embedding training pipeline (DeepFace + Facenet512)
 ├── yolov8s.pt               # YOLOv8 Small model weights
 ├── known_faces/             # Face recognition image database
 │   ├── PersonName.jpg       # Individual headshot photos
@@ -161,7 +163,7 @@ python main.py
 │       └── *.jpg
 └── modules/
     ├── audio_tts.py         # Async Windows SAPI voice engine (non-blocking)
-    ├── face_recognizer.py   # MTCNN + FaceNet face matching engine
+    ├── face_recognizer.py   # DeepFace Facenet512 face matching engine
     ├── ocr_reader.py        # EasyOCR text reading module
     ├── spatial_grid.py      # 3×3 grid positioning & distance estimation
     ├── road_signs.py        # Threaded road sign detection + OCR
@@ -176,8 +178,8 @@ python main.py
 ┌──────────────────────────────────────────────────────────┐
 │                    TRAINING (Offline)                     │
 │                                                          │
-│  known_faces/  ──►  MTCNN Face    ──►  InceptionResnetV1 │
-│  (images)          Detection          (512-dim vector)   │
+│  known_faces/  ──►  OpenCV Haar   ──►  Facenet512        │
+│  (images)          Cascade Detect     (512-dim vector)   │
 │       │                                     │            │
 │       ▼                                     ▼            │
 │  9 augmented                       face_embeddings.pkl   │
@@ -190,11 +192,12 @@ python main.py
 ┌──────────────────────────────────────────────────────────┐
 │                    RUNTIME (Live)                         │
 │                                                          │
-│  YOLO detects   ──►  Crop person  ──►  MTCNN detects     │
+│  YOLO detects   ──►  Crop person  ──►  OpenCV detects    │
 │  "person"            region            face in crop      │
 │                                           │              │
 │                                           ▼              │
-│                                    InceptionResnetV1     │
+│                                    Facenet512 via        │
+│                                    DeepFace              │
 │                                    (512-dim embedding)   │
 │                                           │              │
 │                                           ▼              │
@@ -215,9 +218,10 @@ python main.py
 ## 🚧 Future Roadmap
 
 - **Indian Road Sign Detection**: Train a custom YOLOv8 model on an Indian Road Sign dataset to recognize iconography-based signs (which don't rely on text).
-- **Raspberry Pi Deployment**: Optimize for edge deployment on Raspberry Pi with camera module.
+- **Raspberry Pi Deployment**: Deploy on Raspberry Pi 4 with camera module (DeepFace is already optimized for this).
 - **Multi-Language OCR**: Extend EasyOCR to support Hindi and other regional languages.
 - **Distance Estimation**: Use monocular depth estimation for more accurate obstacle distance measurement.
+- **Cross-Platform TTS**: Migrate from Windows SAPI to pyttsx3 for Linux/Raspberry Pi support.
 
 ---
 

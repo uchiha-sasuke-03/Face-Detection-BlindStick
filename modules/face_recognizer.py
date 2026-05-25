@@ -1,15 +1,16 @@
 """
-Face Recognizer Module - Haar Cascade + face_recognition (v6)
-==============================================================
-Uses OpenCV Haar Cascade for face detection and dlib (via face_recognition)
-for 128-dimensional embeddings. Lightweight enough for Raspberry Pi 4.
+Face Recognizer Module - DeepFace Facenet512 (v6)
+===================================================
+Uses DeepFace with Facenet512 model for 512-dimensional embeddings and
+OpenCV's Haar Cascade for lightweight face detection. Optimized for
+Raspberry Pi 4 deployment — no PyTorch required.
 
 Key design choices:
-  - Haar Cascade: fast detection, ships with OpenCV, ~30 FPS on Pi 4
-  - face_recognition (dlib): 128-dim embeddings, excellent accuracy
-  - Euclidean distance threshold: 0.50 (well-calibrated for 128-dim space)
-  - 3-pass detection: original → CLAHE → histogram equalized
+  - OpenCV Haar Cascade: fast, lightweight face detection (ideal for ARM)
+  - Facenet512: 512-dim embeddings, high accuracy
+  - Cosine similarity threshold: 0.50 (tuned for real-world conditions)
   - identify_person(): integrates directly with YOLO "person" detection
+  - CLAHE fallback: enhances low-light images before re-trying detection
   - 5-second cooldown on name announcements
 """
 
@@ -20,22 +21,23 @@ import time
 import cv2
 import numpy as np
 
-# Try to import face_recognition
+# Try to import DeepFace
 try:
-    import face_recognition
+    from deepface import DeepFace
     FACE_REC_AVAILABLE = True
 except ImportError:
     FACE_REC_AVAILABLE = False
-    print("Warning: face_recognition not installed. Facial recognition disabled.")
-    print("  Install with: pip install face_recognition")
+    print("Warning: deepface not installed. Facial recognition disabled.")
+    print("  Install with: pip install deepface tf-keras")
 
-# Haar Cascade path (ships with OpenCV)
-HAAR_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+# DeepFace model settings
+MODEL_NAME       = "Facenet512"
+DETECTOR_BACKEND = "opencv"
 
 
 class FaceRecognizer:
     # ── Configuration ───────────────────────────────────────────────────
-    DISTANCE_THRESHOLD   = 0.50       # Maximum Euclidean distance for a match
+    COSINE_THRESHOLD     = 0.50        # Minimum cosine similarity for a match
     DB_FILENAME          = "face_embeddings_v6.pkl"
 
     def __init__(self, known_faces_dir="known_faces"):
@@ -50,10 +52,12 @@ class FaceRecognizer:
         self._current_name_time = 0
         self._name_lock = threading.Lock()
 
-        # Models
-        self.cascade = None
+        # Database
         self.database = {}
         self.db_loaded = False
+
+        # Model warm-up flag
+        self._model_warmed = False
 
         if not FACE_REC_AVAILABLE:
             return
@@ -61,21 +65,27 @@ class FaceRecognizer:
         if not os.path.exists(known_faces_dir):
             os.makedirs(known_faces_dir)
 
-        self._load_detector()
         self._load_database()
+        # Warm the model in background so first recognition is fast
+        if self.db_loaded:
+            threading.Thread(target=self._warm_model, daemon=True).start()
 
-    def _load_detector(self):
-        """Load the Haar Cascade face detector."""
+    def _warm_model(self):
+        """Pre-load the Facenet512 model by running a dummy inference."""
         try:
-            self.cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
-            if self.cascade.empty():
-                print("Face Detector: Failed to load Haar Cascade")
-                self.cascade = None
-            else:
-                print("Face Detector: Haar Cascade loaded successfully")
+            dummy = np.zeros((160, 160, 3), dtype=np.uint8)
+            dummy[40:120, 40:120, :] = 128
+            DeepFace.represent(
+                img_path=dummy,
+                model_name=MODEL_NAME,
+                detector_backend=DETECTOR_BACKEND,
+                enforce_detection=False,
+            )
+            self._model_warmed = True
+            print("Face Model: Facenet512 pre-loaded successfully")
         except Exception as e:
-            print(f"Face Detector: Failed to load - {e}")
-            self.cascade = None
+            print(f"Face Model: Warm-up note - {e}")
+            self._model_warmed = True  # Proceed anyway
 
     def _load_database(self):
         """Load pre-computed face embeddings."""
@@ -102,50 +112,18 @@ class FaceRecognizer:
         except Exception as e:
             print(f"Face DB: Failed to load - {e}")
 
-    def _detect_faces_haar(self, img_bgr):
-        """Detect faces using Haar Cascade. Returns list of (x, y, w, h)."""
-        if self.cascade is None:
-            return []
-
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        faces = self.cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(60, 60),
-            flags=cv2.CASCADE_SCALE_IMAGE
-        )
-        return faces if len(faces) > 0 else []
-
     @staticmethod
-    def _enhance_clahe(img_bgr):
-        """Apply CLAHE enhancement for low-light images."""
-        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        lab = cv2.merge([l, a, b])
-        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-    @staticmethod
-    def _enhance_histeq(img_bgr):
-        """Apply histogram equalization for contrast improvement."""
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        eq = cv2.equalizeHist(gray)
-        return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
-
-    @staticmethod
-    def _euclidean_dist(a, b):
-        """Euclidean distance between two vectors."""
-        return float(np.linalg.norm(a - b))
+    def _cosine_sim(a, b):
+        """Cosine similarity between two L2-normalized vectors."""
+        return float(np.dot(a, b))
 
     def _get_embedding(self, img_bgr):
         """
-        Detect the best face in a BGR image and return its 128-dim embedding.
-        Uses 3-pass detection: original → CLAHE → histogram equalization.
-        Returns 128-dim numpy array or None.
+        Detect the best face in a BGR image and return its embedding.
+        Tries CLAHE enhancement as fallback for low-light.
+        Returns 512-dim numpy array or None.
         """
-        if self.cascade is None:
+        if not FACE_REC_AVAILABLE:
             return None
 
         # Try original image first
@@ -153,52 +131,57 @@ class FaceRecognizer:
         if emb is not None:
             return emb
 
-        # Fallback 1: CLAHE enhancement for low light
-        enhanced = self._enhance_clahe(img_bgr)
-        emb = self._try_get_embedding(enhanced)
-        if emb is not None:
-            return emb
+        # Fallback: CLAHE enhancement for low light
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-        # Fallback 2: Histogram equalization
-        histeq = self._enhance_histeq(img_bgr)
-        return self._try_get_embedding(histeq)
+        return self._try_get_embedding(enhanced)
 
     def _try_get_embedding(self, img_bgr):
         """Try to detect a face and get its embedding. Returns numpy array or None."""
         try:
-            faces = self._detect_faces_haar(img_bgr)
-            if len(faces) == 0:
-                return None
-
-            # Pick the largest face
-            largest = max(faces, key=lambda f: f[2] * f[3])
-            x, y, w, h = largest
-
-            # Convert Haar (x, y, w, h) to face_recognition format (top, right, bottom, left)
-            face_location = (y, x + w, y + h, x)
-
-            # Convert BGR to RGB
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-            # Get 128-dim encoding (1 jitter for speed during live recognition)
-            encodings = face_recognition.face_encodings(
-                img_rgb,
-                known_face_locations=[face_location],
-                num_jitters=1,
-                model="large"
+            results = DeepFace.represent(
+                img_path=img_bgr,
+                model_name=MODEL_NAME,
+                detector_backend=DETECTOR_BACKEND,
+                enforce_detection=False,
+                align=True,
             )
 
-            if len(encodings) == 0:
+            if not results or len(results) == 0:
                 return None
 
-            emb_np = encodings[0].astype(np.float32)
+            # Pick the largest face detected
+            best = max(results, key=lambda r: r.get("facial_area", {}).get("w", 0) *
+                                               r.get("facial_area", {}).get("h", 0))
+
+            embedding = np.array(best["embedding"], dtype=np.float32)
+
+            if embedding.shape[0] != 512:
+                return None
+
+            # Check face confidence — skip if too low
+            face_confidence = best.get("face_confidence", 0)
+            if face_confidence < 0.5:
+                # Low confidence might mean no real face was detected
+                face_area = best.get("facial_area", {})
+                face_w = face_area.get("w", 0)
+                face_h = face_area.get("h", 0)
+                img_h, img_w = img_bgr.shape[:2]
+                # If "face" covers almost the entire image, it's likely a false positive
+                if face_w >= img_w * 0.9 and face_h >= img_h * 0.9:
+                    return None
 
             # L2 normalize
-            norm = np.linalg.norm(emb_np)
+            norm = np.linalg.norm(embedding)
             if norm > 0:
-                emb_np = emb_np / norm
+                embedding = embedding / norm
 
-            return emb_np
+            return embedding
 
         except Exception:
             return None
@@ -206,38 +189,37 @@ class FaceRecognizer:
     def _find_best_match(self, live_emb):
         """
         Compare a live embedding against the database.
-        Returns (name, distance) or (None, float('inf')).
+        Returns (name, score) or (None, 0).
 
         Strategy:
           - Check average embedding first (fast rejection)
           - If promising, check individual embeddings
-          - Score = 40% average_dist + 60% best_individual_dist
+          - Score = 40% average + 60% best individual
         """
         best_name = None
-        best_dist = float('inf')
+        best_score = -1.0
 
         for name, data in self.database.items():
-            avg_dist = self._euclidean_dist(live_emb, data['average'])
+            avg_score = self._cosine_sim(live_emb, data['average'])
 
-            # If average is even remotely close, check individuals
-            if avg_dist < self.DISTANCE_THRESHOLD * 1.5:
-                individual_dists = [
-                    self._euclidean_dist(live_emb, emb)
+            if avg_score > self.COSINE_THRESHOLD * 0.75:
+                individual_scores = [
+                    self._cosine_sim(live_emb, emb)
                     for emb in data['embeddings']
                 ]
-                best_individual = min(individual_dists)
-                combined = 0.40 * avg_dist + 0.60 * best_individual
+                best_individual = max(individual_scores)
+                combined = 0.40 * avg_score + 0.60 * best_individual
             else:
-                combined = avg_dist
+                combined = avg_score
 
-            if combined < best_dist:
-                best_dist = combined
+            if combined > best_score:
+                best_score = combined
                 best_name = name
 
-        if best_dist <= self.DISTANCE_THRESHOLD:
-            return best_name, best_dist
+        if best_score >= self.COSINE_THRESHOLD:
+            return best_name, best_score
 
-        return None, float('inf')
+        return None, 0
 
     def identify_person(self, frame, xyxy):
         """
@@ -270,7 +252,7 @@ class FaceRecognizer:
                 return None
 
             # Match against database
-            name, dist = self._find_best_match(emb)
+            name, score = self._find_best_match(emb)
             return name
 
         except Exception:
@@ -291,7 +273,7 @@ class FaceRecognizer:
                 if emb is None:
                     return
 
-                name, dist = self._find_best_match(emb)
+                name, score = self._find_best_match(emb)
                 if name is None:
                     return
 

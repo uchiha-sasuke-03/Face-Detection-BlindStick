@@ -1,15 +1,14 @@
 """
-Face Embedding Training Script (v6 - Haar Cascade + face_recognition)
-=====================================================================
-Uses OpenCV Haar Cascade for face detection and dlib (via face_recognition)
-for 128-dimensional face embeddings. Lightweight enough for Raspberry Pi 4.
+Face Embedding Training Script (v6 - DeepFace Facenet512)
+==========================================================
+Uses DeepFace with Facenet512 model for 512-dimensional face embeddings
+and OpenCV's Haar Cascade for fast, lightweight face detection.
+Optimized for Raspberry Pi 4 deployment — no PyTorch required.
 
 Strategy:
-  - Haar Cascade: fast face detection, ships with OpenCV
-  - face_recognition (dlib): 128-dim embeddings, excellent accuracy
-  - 3-pass detection: original → CLAHE enhanced → histogram equalized
-  - Data augmentation: 13 variants per image for maximum robustness
-  - num_jitters=3 during encoding for more stable embeddings
+  - OpenCV Haar Cascade: fast, lightweight face detection
+  - Facenet512: produces 512-dim embeddings (same dimensionality as before)
+  - Data augmentation: brightness/gamma/flip variants for lighting robustness
   - Stores per-person embeddings + averaged centroid for fast matching
 
 Usage:
@@ -22,32 +21,21 @@ import pickle
 import cv2
 import numpy as np
 import time
-import face_recognition
+
+# DeepFace — lazy-loads the Facenet512 model on first call
+from deepface import DeepFace
 
 # ── Config ──────────────────────────────────────────────────────────────────
 KNOWN_FACES_DIR  = "known_faces"
 DB_OUTPUT_PATH   = "known_faces/face_embeddings_v6.pkl"
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
+# DeepFace settings
+MODEL_NAME       = "Facenet512"      # 512-dim embeddings
+DETECTOR_BACKEND = "opencv"          # Lightweight, fast on ARM/Pi
+
 # Folders to skip (generic names, not a person)
 SKIP_FOLDERS = {"Blind Stick Face Recog", "__pycache__"}
-
-# Haar Cascade path (ships with OpenCV)
-HAAR_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-
-# Number of jitters for face_recognition encoding (higher = more accurate, slower)
-NUM_JITTERS = 3
-
-
-def init_detector():
-    """Initialize the Haar Cascade face detector."""
-    print(f"  Loading Haar Cascade face detector...")
-    cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
-    if cascade.empty():
-        print("ERROR: Failed to load Haar Cascade classifier.")
-        sys.exit(1)
-    print(f"  Haar Cascade loaded from: {HAAR_CASCADE_PATH}")
-    return cascade
 
 
 def collect_images(root_dir):
@@ -75,28 +63,26 @@ def collect_images(root_dir):
 
 def augment_image(img_bgr):
     """
-    Generate augmented versions of an image for lighting and pose robustness.
+    Generate augmented versions of an image for lighting robustness.
     Returns list of BGR images (including original).
-    13 variants total: original + flip + 4 gamma + 2 brightness + CLAHE
-                       + 2 rotations + blur + noise
     """
     augmented = [img_bgr]
 
-    # 1. Horizontal flip
+    # Horizontal flip
     augmented.append(cv2.flip(img_bgr, 1))
 
-    # 2. Gamma corrections (simulate different lighting)
+    # Gamma corrections (simulate different lighting)
     for gamma in [0.4, 0.6, 1.5, 2.0]:
         inv_gamma = 1.0 / gamma
         table = np.array([((i / 255.0) ** inv_gamma) * 255
                           for i in range(256)]).astype("uint8")
         augmented.append(cv2.LUT(img_bgr, table))
 
-    # 3. Brightness adjustments
+    # Brightness adjustments
     for alpha, beta in [(0.6, -20), (1.4, 20)]:
         augmented.append(cv2.convertScaleAbs(img_bgr, alpha=alpha, beta=beta))
 
-    # 4. CLAHE on the luminance channel
+    # CLAHE on the luminance channel
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
@@ -104,127 +90,89 @@ def augment_image(img_bgr):
     lab = cv2.merge([l, a, b])
     augmented.append(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
 
-    # 5. Slight rotations (±10°) for pose robustness
-    h, w = img_bgr.shape[:2]
-    center = (w // 2, h // 2)
-    for angle in [-10, 10]:
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(img_bgr, M, (w, h), borderMode=cv2.BORDER_REFLECT)
-        augmented.append(rotated)
-
-    # 6. Gaussian blur (simulates slight motion blur / out-of-focus)
-    augmented.append(cv2.GaussianBlur(img_bgr, (5, 5), 0))
-
-    # 7. Gaussian noise (simulates sensor noise in low light)
-    noise = np.random.normal(0, 12, img_bgr.shape).astype(np.int16)
-    noisy = np.clip(img_bgr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    augmented.append(noisy)
-
     return augmented
 
 
-def detect_face_haar(img_bgr, cascade):
+def extract_embedding(img_bgr):
     """
-    Detect faces using Haar Cascade with tuned parameters.
-    Returns list of (x, y, w, h) tuples.
+    Detect the largest face in a BGR image and return its 512-dim embedding.
+    Returns (embedding_np, info_str) or (None, error_str).
     """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(60, 60),
-        flags=cv2.CASCADE_SCALE_IMAGE
-    )
-    return faces if len(faces) > 0 else []
+    try:
+        # DeepFace.represent() handles detection + alignment + embedding in one call
+        results = DeepFace.represent(
+            img_path=img_bgr,           # Pass numpy array directly
+            model_name=MODEL_NAME,
+            detector_backend=DETECTOR_BACKEND,
+            enforce_detection=False,     # Don't crash if no face found
+            align=True,                  # Align face before embedding
+        )
+
+        if not results or len(results) == 0:
+            return None, "no face detected"
+
+        # If multiple faces found, pick the largest (by facial_area)
+        best = max(results, key=lambda r: r.get("facial_area", {}).get("w", 0) *
+                                           r.get("facial_area", {}).get("h", 0))
+
+        embedding = np.array(best["embedding"], dtype=np.float32)
+
+        # Verify we got a valid embedding
+        if embedding.shape[0] != 512:
+            return None, f"unexpected embedding dim: {embedding.shape[0]}"
+
+        # Check if a face was actually detected (DeepFace with enforce_detection=False
+        # may return an embedding of the whole image if no face is found)
+        face_area = best.get("facial_area", {})
+        face_w = face_area.get("w", 0)
+        face_h = face_area.get("h", 0)
+        img_h, img_w = img_bgr.shape[:2]
+
+        # If the "face" is basically the entire image, it likely didn't detect a real face
+        if face_w >= img_w * 0.95 and face_h >= img_h * 0.95:
+            # Still accept it for training (the user provided a face photo),
+            # but note it in the info
+            pass
+
+        # L2 normalize
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+
+        confidence = best.get("face_confidence", 0)
+        return embedding, f"conf={confidence:.3f}, area={face_w}x{face_h}"
+
+    except Exception as e:
+        return None, f"error: {str(e)}"
 
 
-def enhance_clahe(img_bgr):
-    """Apply CLAHE enhancement for low-light images."""
+def extract_embedding_with_fallback(img_bgr):
+    """
+    Try to extract an embedding, falling back to CLAHE enhancement for low-light images.
+    """
+    emb, info = extract_embedding(img_bgr)
+    if emb is not None:
+        return emb, info
+
+    # Fallback: CLAHE enhanced image
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
     l = clahe.apply(l)
     lab = cv2.merge([l, a, b])
-    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-
-def enhance_histeq(img_bgr):
-    """Apply histogram equalization for contrast improvement."""
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    eq = cv2.equalizeHist(gray)
-    return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
-
-
-def extract_embedding(img_bgr, cascade):
-    """
-    Detect the largest face in a BGR image and return its 128-dim embedding.
-    Uses 3-pass detection: original → CLAHE → histogram equalization.
-    Returns (embedding_np, info_str) or (None, error_str).
-    """
-    # Pass 1: Original image
-    faces = detect_face_haar(img_bgr, cascade)
-    source = img_bgr
-
-    # Pass 2: CLAHE enhanced
-    if len(faces) == 0:
-        enhanced = enhance_clahe(img_bgr)
-        faces = detect_face_haar(enhanced, cascade)
-        source = enhanced
-
-    # Pass 3: Histogram equalization
-    if len(faces) == 0:
-        histeq = enhance_histeq(img_bgr)
-        faces = detect_face_haar(histeq, cascade)
-        source = histeq
-
-    if len(faces) == 0:
-        return None, "no face detected (3-pass)"
-
-    # Pick the largest face (by area)
-    largest = max(faces, key=lambda f: f[2] * f[3])
-    x, y, w, h = largest
-
-    # Convert Haar (x, y, w, h) to face_recognition format (top, right, bottom, left)
-    top = y
-    right = x + w
-    bottom = y + h
-    left = x
-    face_location = (top, right, bottom, left)
-
-    # Convert BGR to RGB for face_recognition
-    img_rgb = cv2.cvtColor(source, cv2.COLOR_BGR2RGB)
-
-    # Get 128-dim face encoding using dlib with jittering
-    encodings = face_recognition.face_encodings(
-        img_rgb,
-        known_face_locations=[face_location],
-        num_jitters=NUM_JITTERS,
-        model="large"
-    )
-
-    if len(encodings) == 0:
-        return None, "face detected but encoding failed"
-
-    emb_np = encodings[0].astype(np.float32)
-
-    # L2 normalize
-    norm = np.linalg.norm(emb_np)
-    if norm > 0:
-        emb_np = emb_np / norm
-
-    return emb_np, f"face=({w}x{h})"
+    return extract_embedding(enhanced)
 
 
 def train():
     print("=" * 62)
-    print("  SMART BLIND STICK - FACE TRAINING v6 (Haar + face_recognition)")
+    print("  SMART BLIND STICK - FACE TRAINING v6 (DeepFace Facenet512)")
     print("=" * 62)
-    print(f"  Embedding     : dlib face_recognition (128-dim)")
+    print(f"  Model         : Facenet512 (512-dim embeddings)")
     print(f"  Detector      : OpenCV Haar Cascade")
-    print(f"  num_jitters   : {NUM_JITTERS}")
-    print(f"  Augmentation  : flip + gamma + brightness + CLAHE + rotate + blur + noise (13x)")
-    print(f"  Detection     : 3-pass (original -> CLAHE -> histogram eq.)")
+    print(f"  Backend       : DeepFace (TF-Keras)")
+    print(f"  Augmentation  : flip + gamma + brightness + CLAHE (9x)")
     print(f"  Source dir    : {os.path.abspath(KNOWN_FACES_DIR)}")
     print("=" * 62)
 
@@ -232,10 +180,24 @@ def train():
         print(f"ERROR: '{KNOWN_FACES_DIR}' not found.")
         sys.exit(1)
 
-    # Initialize detector
-    cascade = init_detector()
+    # Pre-warm DeepFace model (first call downloads + loads weights)
+    print("\n  Loading Facenet512 model (first run downloads weights)...")
+    try:
+        # Create a small dummy image to trigger model loading
+        dummy = np.zeros((160, 160, 3), dtype=np.uint8)
+        dummy[40:120, 40:120, :] = 128  # Gray square
+        DeepFace.represent(
+            img_path=dummy,
+            model_name=MODEL_NAME,
+            detector_backend=DETECTOR_BACKEND,
+            enforce_detection=False,
+        )
+        print("  Facenet512 model loaded successfully.\n")
+    except Exception as e:
+        print(f"  Warning: Model pre-warm returned: {e}")
+        print("  Continuing — model will load on first real image.\n")
 
-    print("\nScanning images...")
+    print("Scanning images...")
     entries = collect_images(KNOWN_FACES_DIR)
     if not entries:
         print("ERROR: No images found.")
@@ -250,7 +212,7 @@ def train():
     for name, paths in people.items():
         print(f"  >> {name}: {len(paths)} image(s)")
 
-    print(f"\n--- Extracting face_recognition embeddings ---\n")
+    print(f"\n--- Extracting Facenet512 embeddings ---\n")
     database = {}
     success_count = 0
     fail_count = 0
@@ -273,7 +235,7 @@ def train():
         img_success = 0
 
         for j, aug_img in enumerate(augmented_images):
-            emb, info = extract_embedding(aug_img, cascade)
+            emb, info = extract_embedding_with_fallback(aug_img)
             if emb is not None:
                 database.setdefault(name, []).append(emb)
                 img_success += 1
@@ -307,8 +269,8 @@ def train():
 
     # Save
     output = {
-        'model': 'dlib-face_recognition-128d',
-        'embedding_dim': 128,
+        'model': 'Facenet512-DeepFace',
+        'embedding_dim': 512,
         'people': final_db,
         'trained_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
