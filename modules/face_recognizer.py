@@ -1,15 +1,15 @@
 """
-Face Recognizer Module - PyTorch FaceNet + MTCNN (v5)
-======================================================
-Uses MTCNN for robust face detection and InceptionResnetV1 (FaceNet)
-for 512-dimensional embeddings. Matches faces using cosine similarity.
+Face Recognizer Module - Haar Cascade + face_recognition (v6)
+==============================================================
+Uses OpenCV Haar Cascade for face detection and dlib (via face_recognition)
+for 128-dimensional embeddings. Lightweight enough for Raspberry Pi 4.
 
 Key design choices:
-  - MTCNN: handles low light, angles, partial occlusion — far better than Haar
-  - FaceNet (VGGFace2): 512-dim embeddings, state-of-the-art accuracy
-  - Cosine similarity threshold: 0.55 (tuned for real-world conditions)
+  - Haar Cascade: fast detection, ships with OpenCV, ~30 FPS on Pi 4
+  - face_recognition (dlib): 128-dim embeddings, excellent accuracy
+  - Euclidean distance threshold: 0.50 (well-calibrated for 128-dim space)
+  - 3-pass detection: original → CLAHE → histogram equalized
   - identify_person(): integrates directly with YOLO "person" detection
-  - CLAHE fallback: enhances low-light images before re-trying detection
   - 5-second cooldown on name announcements
 """
 
@@ -19,25 +19,24 @@ import threading
 import time
 import cv2
 import numpy as np
-import torch
-from PIL import Image
 
-# Try to import facenet-pytorch
+# Try to import face_recognition
 try:
-    from facenet_pytorch import MTCNN, InceptionResnetV1
+    import face_recognition
     FACE_REC_AVAILABLE = True
 except ImportError:
     FACE_REC_AVAILABLE = False
-    print("Warning: facenet-pytorch not installed. Facial recognition disabled.")
-    print("  Install with: pip install facenet-pytorch --no-deps")
+    print("Warning: face_recognition not installed. Facial recognition disabled.")
+    print("  Install with: pip install face_recognition")
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Haar Cascade path (ships with OpenCV)
+HAAR_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 
 
 class FaceRecognizer:
     # ── Configuration ───────────────────────────────────────────────────
-    COSINE_THRESHOLD     = 0.50        # Minimum cosine similarity for a match
-    DB_FILENAME          = "face_embeddings_v5.pkl"
+    DISTANCE_THRESHOLD   = 0.50       # Maximum Euclidean distance for a match
+    DB_FILENAME          = "face_embeddings_v6.pkl"
 
     def __init__(self, known_faces_dir="known_faces"):
         self.known_faces_dir = known_faces_dir
@@ -52,8 +51,7 @@ class FaceRecognizer:
         self._name_lock = threading.Lock()
 
         # Models
-        self.mtcnn = None
-        self.resnet = None
+        self.cascade = None
         self.database = {}
         self.db_loaded = False
 
@@ -63,27 +61,21 @@ class FaceRecognizer:
         if not os.path.exists(known_faces_dir):
             os.makedirs(known_faces_dir)
 
-        self._load_models()
+        self._load_detector()
         self._load_database()
 
-    def _load_models(self):
-        """Load MTCNN and InceptionResnetV1."""
+    def _load_detector(self):
+        """Load the Haar Cascade face detector."""
         try:
-            self.mtcnn = MTCNN(
-                image_size=160,
-                margin=20,
-                min_face_size=20,
-                thresholds=[0.5, 0.6, 0.6],
-                factor=0.7,
-                keep_all=False,       # Only return the best face
-                device=DEVICE,
-            )
-            self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
-            print("Face Models: MTCNN + FaceNet loaded successfully")
+            self.cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
+            if self.cascade.empty():
+                print("Face Detector: Failed to load Haar Cascade")
+                self.cascade = None
+            else:
+                print("Face Detector: Haar Cascade loaded successfully")
         except Exception as e:
-            print(f"Face Models: Failed to load - {e}")
-            self.mtcnn = None
-            self.resnet = None
+            print(f"Face Detector: Failed to load - {e}")
+            self.cascade = None
 
     def _load_database(self):
         """Load pre-computed face embeddings."""
@@ -110,18 +102,50 @@ class FaceRecognizer:
         except Exception as e:
             print(f"Face DB: Failed to load - {e}")
 
+    def _detect_faces_haar(self, img_bgr):
+        """Detect faces using Haar Cascade. Returns list of (x, y, w, h)."""
+        if self.cascade is None:
+            return []
+
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        faces = self.cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(60, 60),
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
+        return faces if len(faces) > 0 else []
+
     @staticmethod
-    def _cosine_sim(a, b):
-        """Cosine similarity between two L2-normalized vectors."""
-        return float(np.dot(a, b))
+    def _enhance_clahe(img_bgr):
+        """Apply CLAHE enhancement for low-light images."""
+        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    def _enhance_histeq(img_bgr):
+        """Apply histogram equalization for contrast improvement."""
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        eq = cv2.equalizeHist(gray)
+        return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def _euclidean_dist(a, b):
+        """Euclidean distance between two vectors."""
+        return float(np.linalg.norm(a - b))
 
     def _get_embedding(self, img_bgr):
         """
-        Detect the best face in a BGR image and return its embedding.
-        Tries CLAHE enhancement as fallback for low-light.
-        Returns 512-dim numpy array or None.
+        Detect the best face in a BGR image and return its 128-dim embedding.
+        Uses 3-pass detection: original → CLAHE → histogram equalization.
+        Returns 128-dim numpy array or None.
         """
-        if self.mtcnn is None or self.resnet is None:
+        if self.cascade is None:
             return None
 
         # Try original image first
@@ -129,38 +153,45 @@ class FaceRecognizer:
         if emb is not None:
             return emb
 
-        # Fallback: CLAHE enhancement for low light
-        lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        lab = cv2.merge([l, a, b])
-        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        # Fallback 1: CLAHE enhancement for low light
+        enhanced = self._enhance_clahe(img_bgr)
+        emb = self._try_get_embedding(enhanced)
+        if emb is not None:
+            return emb
 
-        return self._try_get_embedding(enhanced)
+        # Fallback 2: Histogram equalization
+        histeq = self._enhance_histeq(img_bgr)
+        return self._try_get_embedding(histeq)
 
     def _try_get_embedding(self, img_bgr):
         """Try to detect a face and get its embedding. Returns numpy array or None."""
         try:
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-
-            # MTCNN returns a face tensor (already aligned + resized to 160x160)
-            face_tensor = self.mtcnn(pil_img)
-
-            if face_tensor is None:
+            faces = self._detect_faces_haar(img_bgr)
+            if len(faces) == 0:
                 return None
 
-            # If keep_all=False, face_tensor is shape (3, 160, 160)
-            if face_tensor.dim() == 3:
-                face_tensor = face_tensor.unsqueeze(0)
+            # Pick the largest face
+            largest = max(faces, key=lambda f: f[2] * f[3])
+            x, y, w, h = largest
 
-            face_tensor = face_tensor.to(DEVICE)
+            # Convert Haar (x, y, w, h) to face_recognition format (top, right, bottom, left)
+            face_location = (y, x + w, y + h, x)
 
-            with torch.no_grad():
-                embedding = self.resnet(face_tensor)
+            # Convert BGR to RGB
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-            emb_np = embedding[0].cpu().numpy().astype(np.float32)
+            # Get 128-dim encoding (1 jitter for speed during live recognition)
+            encodings = face_recognition.face_encodings(
+                img_rgb,
+                known_face_locations=[face_location],
+                num_jitters=1,
+                model="large"
+            )
+
+            if len(encodings) == 0:
+                return None
+
+            emb_np = encodings[0].astype(np.float32)
 
             # L2 normalize
             norm = np.linalg.norm(emb_np)
@@ -175,37 +206,38 @@ class FaceRecognizer:
     def _find_best_match(self, live_emb):
         """
         Compare a live embedding against the database.
-        Returns (name, score) or (None, 0).
+        Returns (name, distance) or (None, float('inf')).
 
         Strategy:
           - Check average embedding first (fast rejection)
           - If promising, check individual embeddings
-          - Score = 40% average + 60% best individual
+          - Score = 40% average_dist + 60% best_individual_dist
         """
         best_name = None
-        best_score = -1.0
+        best_dist = float('inf')
 
         for name, data in self.database.items():
-            avg_score = self._cosine_sim(live_emb, data['average'])
+            avg_dist = self._euclidean_dist(live_emb, data['average'])
 
-            if avg_score > self.COSINE_THRESHOLD * 0.75:
-                individual_scores = [
-                    self._cosine_sim(live_emb, emb)
+            # If average is even remotely close, check individuals
+            if avg_dist < self.DISTANCE_THRESHOLD * 1.5:
+                individual_dists = [
+                    self._euclidean_dist(live_emb, emb)
                     for emb in data['embeddings']
                 ]
-                best_individual = max(individual_scores)
-                combined = 0.40 * avg_score + 0.60 * best_individual
+                best_individual = min(individual_dists)
+                combined = 0.40 * avg_dist + 0.60 * best_individual
             else:
-                combined = avg_score
+                combined = avg_dist
 
-            if combined > best_score:
-                best_score = combined
+            if combined < best_dist:
+                best_dist = combined
                 best_name = name
 
-        if best_score >= self.COSINE_THRESHOLD:
-            return best_name, best_score
+        if best_dist <= self.DISTANCE_THRESHOLD:
+            return best_name, best_dist
 
-        return None, 0
+        return None, float('inf')
 
     def identify_person(self, frame, xyxy):
         """
@@ -238,7 +270,7 @@ class FaceRecognizer:
                 return None
 
             # Match against database
-            name, score = self._find_best_match(emb)
+            name, dist = self._find_best_match(emb)
             return name
 
         except Exception:
@@ -259,7 +291,7 @@ class FaceRecognizer:
                 if emb is None:
                     return
 
-                name, score = self._find_best_match(emb)
+                name, dist = self._find_best_match(emb)
                 if name is None:
                     return
 

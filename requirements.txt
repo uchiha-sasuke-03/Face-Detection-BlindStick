@@ -1,7 +1,8 @@
 ultralytics
 opencv-python
-deepface
-tf-keras
+dlib-bin
+face_recognition_models
+face_recognition
 easyocr
 numpy
 pywin32
