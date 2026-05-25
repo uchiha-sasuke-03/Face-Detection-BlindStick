@@ -44,15 +44,39 @@ Prevents auditory overload by enforcing a **3-second cooldown** on repeated obst
 
 ## 💻 Prerequisites & Requirements
 
-This software is built and optimized for **Windows** (with Raspberry Pi 4 deployment in mind).
+This software is built to run on both **Windows** (for development) and **Raspberry Pi 4** (for deployment).
 
-### 1. Hardware Required
-- A PC/Laptop (a dedicated GPU is recommended for higher framerates).
-- A standard Webcam (or Raspberry Pi Camera module).
+### 1. Hardware Requirements
 
-### 2. Software Required
-- **Python 3.10–3.14**.
-- **Git** (to clone the repository).
+#### For PC/Laptop (Development)
+- A Windows PC/Laptop (a dedicated GPU is recommended for higher framerates, but CPU-only works).
+- A standard USB Webcam.
+
+#### For Raspberry Pi (Deployment)
+- **Raspberry Pi 4 Model B (4GB or 8GB RAM)**: 4GB is the minimum required to run YOLOv8 and DeepFace concurrently without freezing.
+- **Camera**: Raspberry Pi Camera Module (v2 or v3) or a compatible USB Webcam.
+- **Storage**: MicroSD Card (At least 32GB, Class 10/A1) for OS, libraries, and models.
+- **Power Supply**: Official 15W USB-C power supply to prevent under-voltage throttling.
+- **Cooling**: A fan or heatsink is highly recommended to prevent thermal throttling during continuous AI inference.
+- **Audio Output**: Headphones or a small portable speaker connected via the 3.5mm audio jack or Bluetooth.
+
+### 2. Software Requirements
+
+#### Operating System
+- **Windows 10/11** (for development)
+- **Raspberry Pi OS (64-bit)** (for deployment). *Note: The 64-bit OS is required for modern AI libraries.*
+
+#### Core Dependencies
+- **Python 3.10–3.12** (Python 3.12 is recommended)
+- **Git** (to clone the repository)
+- **C++ Build Tools**: Visual Studio Build Tools (Windows) or `build-essential` (Linux/Pi) for compiling certain Python packages.
+
+#### System-level Libraries (Raspberry Pi / Linux Only)
+If you are deploying on a Raspberry Pi, you need to install standard system dependencies for OpenCV and GUI before running `pip install`:
+```bash
+sudo apt update
+sudo apt install libgl1-mesa-glx libglib2.0-0
+```
 
 ---
 
