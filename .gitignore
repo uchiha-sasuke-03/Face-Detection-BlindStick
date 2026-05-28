@@ -14,8 +14,11 @@ known_faces/face_embeddings*.pkl
 known_faces/face_model.yml
 known_faces/face_labels.pkl
 
-# DeepFace cache (legacy)
+# Legacy cache files
 known_faces/ds_model_*
+
+# Downloaded model files (auto-downloaded by train_faces.py)
+models/
 
 # YOLO weights (downloaded automatically)
 *.pt

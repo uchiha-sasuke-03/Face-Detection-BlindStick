@@ -25,15 +25,16 @@ def analyze_position(xyxy, frame_width, frame_height):
     else:
         v_pos = "bottom"
 
-    # Calculate distance proxy based on area
-    box_area = (x_max - x_min) * (y_max - y_min)
-    frame_area = frame_width * frame_height
-    area_ratio = box_area / frame_area
+    # Calculate distance proxy based on the maximum dimension ratio
+    # This is more robust than area, as it handles tall (people) and wide (cars) objects consistently.
+    width_ratio = (x_max - x_min) / frame_width
+    height_ratio = (y_max - y_min) / frame_height
+    max_dim_ratio = max(width_ratio, height_ratio)
     
-    if area_ratio > 0.05:
+    if max_dim_ratio > 0.40:
         distance = "close"
-    elif area_ratio > 0.015:
-        distance = "medium distance"
+    elif max_dim_ratio > 0.20:
+        distance = "medium"
     else:
         distance = "far"
         
