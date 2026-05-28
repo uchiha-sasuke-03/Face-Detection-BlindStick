@@ -125,7 +125,7 @@ python main.py
 │                                    vs. trained DB        │
 │                                           │              │
 │                                           ▼              │
-│                                 Match ≥ 0.50 ?           │
+│                                 Match ≥ 0.30 ?           │
 │                                   YES → "I see Anupam"   │
 │                                   NO  → "person close"   │
 └──────────────────────────────────────────────────────────┘
