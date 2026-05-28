@@ -44,7 +44,7 @@ def _ensure_models():
 
 
 class FaceRecognizer:
-    COSINE_THRESHOLD = 0.50
+    COSINE_THRESHOLD = 0.30
     DB_FILENAME      = "face_embeddings_v7.pkl"
 
     def __init__(self, known_faces_dir="known_faces"):
