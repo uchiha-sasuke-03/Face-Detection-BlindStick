@@ -96,6 +96,31 @@ python main.py
 
 ---
 
+## 🛠️ Project Structure
+
+```
+├── main.py                  # Core application loop (YOLOv8 + OCR + TTS)
+├── train_faces.py           # Face embedding training pipeline (MobileFaceNet)
+├── yolov8n.pt               # YOLOv8 Nano model weights
+├── known_faces/             # Face recognition image database
+│   ├── PersonName.jpg       # Individual headshot photos
+│   └── PersonName/          # Subfolder with multiple photos
+│       └── *.jpg
+├── models/                  # Auto-downloaded system weights
+│   ├── deploy.prototxt      # OpenCV SSD detector architecture
+│   ├── res10_300x300...     # OpenCV SSD detector weights
+│   └── mobilefacenet.onnx   # MobileFaceNet 512-dim embedding model
+└── modules/
+    ├── audio_tts.py         # Async Windows SAPI voice engine (non-blocking)
+    ├── face_recognizer.py   # OpenCV SSD + MobileFaceNet matching engine
+    ├── ocr_reader.py        # Tesseract OCR text reading module
+    ├── spatial_grid.py      # 3×3 grid positioning & distance estimation
+    ├── road_signs.py        # Threaded road sign detection + OCR
+    └── traffic_analyzer.py  # OpenCV HSV color analysis for traffic lights
+```
+
+---
+
 ## 🧠 Face Recognition Architecture
 
 ```
