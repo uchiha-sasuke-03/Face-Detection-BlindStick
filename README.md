@@ -11,7 +11,7 @@ Optimized for **Raspberry Pi 4** and CPU deployment — ultra-lightweight with h
 ### 🔍 Object Detection & Spatial Awareness
 Uses a pre-trained **YOLOv8 Nano (yolov8n)** model for high-speed CPU object detection. 
 - **Distance Estimation**: Uses an advanced maximum dimension ratio (height/width relative to the frame) to consistently identify objects as "close", "medium", or "far" regardless of their shape (tall vs. wide).
-- **Location**: "left", "straight ahead", or "right".
+- **Location**: "left", "straight ahead" or "right".
 - **Frame Skipping**: Analyzes every second frame while reusing bounding boxes, massively boosting rendering and apparent FPS.
 
 > **Smart Alert Mode**: Only objects at **"close" distance** trigger voice alerts. Medium and far objects are shown on-screen but remain silent — reducing noise and prioritizing immediate hazards.
